@@ -30,37 +30,22 @@
 module AP_MODULE_DECLARE_DATA remoteip_module;
 
 typedef struct {
-    /** A proxy IP mask to match */
     apr_ipsubnet_t *ip;
-    /** Flagged if internal, otherwise an external trusted proxy */
     void  *internal;
 } remoteip_proxymatch_t;
 
 typedef struct {
-    /** The header to retrieve a proxy-via ip list */
     const char *header_name;
-    /** A header to record the proxied IP's 
-     * (removed as the physical connection and 
-     * from the proxy-via ip header value list) 
-     */
     const char *proxies_header_name;
-    /** A list of trusted proxies, ideally configured
-     *  with the most commonly encountered listed first
-     */
     apr_array_header_t *proxymatch_ip;
 } remoteip_config_t;
 
 typedef struct {
-    /** The previous proxy-via request header value */
     const char *prior_remote;
-    /** The unmodified original ip and address */
     const char *orig_ip;
     apr_sockaddr_t *orig_addr;
-    /** The list of proxy ip's ignored as remote ip's */
     const char *proxy_ips;
-    /** The remaining list of untrusted proxied remote ip's */
     const char *proxied_remote;
-    /** The most recently modified ip and address record */
     const char *proxied_ip;
     apr_sockaddr_t proxied_addr;
 } remoteip_conn_t;
@@ -68,9 +53,6 @@ typedef struct {
 static void *create_remoteip_server_config(apr_pool_t *p, server_rec *s)
 {
     remoteip_config_t *config = apr_pcalloc(p, sizeof *config);
-    /* config->header_name = NULL;
-     * config->proxies_header_name = NULL;
-     */
     return config;
 }
 
@@ -112,16 +94,12 @@ static const char *proxies_header_name_set(cmd_parms *cmd, void *dummy,
     return NULL;
 }
 
-/* Would be quite nice if APR exported this */
-/* apr:network_io/unix/sockaddr.c */
 static int looks_like_ip(const char *ipstr)
 {
     if (ap_strchr_c(ipstr, ':')) {
-        /* definitely not a hostname; assume it is intended to be an IPv6 address */
         return 1;
     }
 
-    /* simple IPv4 address string check */
     while ((*ipstr == '.') || apr_isdigit(*ipstr))
         ipstr++;
     return (*ipstr == '\0');
@@ -145,7 +123,6 @@ static const char *proxies_set(cmd_parms *cmd, void *internal,
     match->internal = cmd->info;;
 
     if (looks_like_ip(ip)) {
-        /* Note s may be null, that's fine (explicit host) */
         rv = apr_ipsubnet_create(&match->ip, ip, s, cmd->pool);
     }
     else
@@ -238,8 +215,6 @@ static int remoteip_modify_connection(request_rec *r)
     unsigned char *addrbyte;
     void *internal = NULL;
 
-    /* This should be done only once, not internal subrequests or redirects
-     */
     if (r->main || r->prev)
         return OK;
 
@@ -248,13 +223,9 @@ static int remoteip_modify_connection(request_rec *r)
 
     if (conn) {
         if (remote && (strcmp(remote, conn->prior_remote) == 0)) {
-            /* TODO: Recycle r-> overrides from previous request
-             */
             goto ditto_request_rec;
         }
         else {
-            /* TODO: Revert connection from previous request
-             */
             c->remote_addr = conn->orig_addr;
             c->remote_ip = (char *) conn->orig_ip;
         }
@@ -274,8 +245,6 @@ static int remoteip_modify_connection(request_rec *r)
 
     while (remote) {
 
-        /* verify c->remote_addr is trusted if there is a trusted proxy list
-         */
         if (config->proxymatch_ip) {
             int i;
             remoteip_proxymatch_t *match;
@@ -314,7 +283,6 @@ static int remoteip_modify_connection(request_rec *r)
         }
 
 #ifdef REMOTEIP_OPTIMIZED
-        /* Decode remote_addr - sucks; apr_sockaddr_vars_set isn't 'public' */
         if (inet_pton(AF_INET, parse_remote, 
                       &temp_sa->sa.sin.sin_addr) > 0) {
             apr_sockaddr_vars_set(temp_sa, APR_INET, temp_sa.port);
@@ -327,10 +295,7 @@ static int remoteip_modify_connection(request_rec *r)
 #endif
         else {
             rv = apr_get_netos_error();
-#else /* !REMOTEIP_OPTIMIZED */
-        /* We map as IPv4 rather than IPv6 for equivilant host names
-         * or IPV4OVERIPV6 
-         */
+#else
         rv = apr_sockaddr_info_get(&temp_sa,  parse_remote, 
                                    APR_UNSPEC, temp_sa->port,
                                    APR_IPV4_ADDR_OK, r->pool);
@@ -349,14 +314,8 @@ static int remoteip_modify_connection(request_rec *r)
 
         addrbyte = (unsigned char *) &temp_sa->sa.sin.sin_addr;
 
-        /* For intranet (Internal proxies) ignore all restrictions below */
         if (!internal
               && ((temp_sa->family == APR_INET
-                   /* For internet (non-Internal proxies) deny all
-                    * RFC3330 designated local/private subnets:
-                    * 10.0.0.0/8   169.254.0.0/16  192.168.0.0/16 
-                    * 127.0.0.0/8  172.16.0.0/12
-                    */
                       && (addrbyte[0] == 10
                        || addrbyte[0] == 127
                        || (addrbyte[0] == 169 && addrbyte[1] == 254)
@@ -364,10 +323,6 @@ static int remoteip_modify_connection(request_rec *r)
                        || (addrbyte[0] == 192 && addrbyte[1] == 168)))
 #if APR_HAVE_IPV6
                || (temp_sa->family == APR_INET6
-                   /* For internet (non-Internal proxies) we translated 
-                    * IPv4-over-IPv6-mapped addresses as IPv4, above.
-                    * Accept only Global Unicast 2000::/3 defined by RFC4291
-                    */
                       && ((temp_sa->sa.sin6.sin6_addr.s6_addr[0] & 0xe0) != 0x20))
 #endif
         )) {
@@ -389,7 +344,6 @@ static int remoteip_modify_connection(request_rec *r)
             conn->orig_ip = c->remote_ip;
         }
 
-        /* Set remote_ip string */
         if (!internal) {
             if (proxy_ips)
                 proxy_ips = apr_pstrcat(r->pool, proxy_ips, ", ", 
@@ -402,17 +356,9 @@ static int remoteip_modify_connection(request_rec *r)
         apr_sockaddr_ip_get(&c->remote_ip, c->remote_addr);
     }
 
-    /* Nothing happened? */
     if (!conn || (c->remote_addr == conn->orig_addr))
         return OK;
 
-    /* Fixups here, remote becomes the new Via header value, etc 
-     * In the heavy operations above we used request scope, to limit
-     * conn pool memory growth on keepalives, so here we must scope
-     * the final results to the connection pool lifetime.
-     * To limit memory growth, we keep recycling the same buffer
-     * for the final apr_sockaddr_t in the remoteip conn rec.
-     */
     c->remote_ip = apr_pstrdup(c->pool, c->remote_ip);
     conn->proxied_ip = c->remote_ip;
     memcpy(&conn->proxied_addr, temp_sa, sizeof(*temp_sa));
@@ -428,7 +374,6 @@ static int remoteip_modify_connection(request_rec *r)
         proxy_ips = apr_pstrdup(c->pool, proxy_ips);
     conn->proxy_ips = proxy_ips;
 
-    /* Unset remote_host string DNS lookups */
     c->remote_host = NULL;
     c->remote_logname = NULL;
 
@@ -486,10 +431,10 @@ static void register_hooks(apr_pool_t *p)
 
 module AP_MODULE_DECLARE_DATA remoteip_module = {
     STANDARD20_MODULE_STUFF,
-    NULL,                          /* create per-directory config structure */
-    NULL,                          /* merge per-directory config structures */
-    create_remoteip_server_config, /* create per-server config structure */
-    merge_remoteip_server_config,  /* merge per-server config structures */
-    remoteip_cmds,                 /* command apr_table_t */
-    register_hooks                 /* register hooks */
+    NULL,
+    NULL,
+    create_remoteip_server_config,
+    merge_remoteip_server_config,
+    remoteip_cmds,
+    register_hooks
 };
